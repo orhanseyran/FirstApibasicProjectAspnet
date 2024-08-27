@@ -18,6 +18,15 @@ builder.Services.AddDefaultIdentity<IdentityUser>(options => options.SignIn.Requ
     .AddEntityFrameworkStores<ApplicationDbContext>();
 builder.Services.AddControllersWithViews();
 
+builder.Services.AddIdentity<IdentityUser, IdentityRole>(options =>
+{
+    // Hatalı giriş denemeleri için ayarlar
+    options.Lockout.DefaultLockoutTimeSpan = TimeSpan.FromMinutes(15); // 15 dakika süreyle kilitle
+    options.Lockout.MaxFailedAccessAttempts = 5; // 5 başarısız denemeden sonra kilitle
+    options.Lockout.AllowedForNewUsers = true; // Yeni kullanıcılar için de kilitleme etkin
+})
+.AddEntityFrameworkStores<ApplicationDbContext>()
+.AddDefaultTokenProviders();
 
 
 var app = builder.Build();

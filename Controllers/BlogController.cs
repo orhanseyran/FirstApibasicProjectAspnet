@@ -16,6 +16,7 @@ using Microsoft.IdentityModel.Tokens;
 using System.Text;
 using System.Threading.Tasks;
 using System;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace Namespace
 {
@@ -34,31 +35,41 @@ namespace Namespace
             _configuration = configuration;
         }
         [HttpPost]
-        public async Task<IActionResult> Login(User user)
-        {
+        [EnableRateLimiting("LoginPolicy")]
+       public async Task<IActionResult> Login(User user)
+{
             // Kullanıcı e-posta ve şifre alanlarının boş olup olmadığını kontrol edin
             if (string.IsNullOrEmpty(user.Email) || string.IsNullOrEmpty(user.Password))
             {
-                return BadRequest("Email and password are required.");
+                return BadRequest("E-posta ve şifre alanları boş olamaz.");
             }
 
             // Kullanıcıyı e-posta adresine göre bulun
             var useremail = await _userManager.FindByEmailAsync(user.Email);
             if (useremail == null)
             {
-                return NotFound("User not found.");
+                return NotFound("Kullanıcı bulunamadı.");
+            }
+
+            // Hesap kilitli mi kontrol et
+            if (await _userManager.IsLockedOutAsync(useremail))
+            {
+                return Unauthorized("Birden Fazla Hatalı Giriş Yaptınız. Hesabınız 15 dakika boyunca kilitlenecektir.");
             }
 
             // E-posta doğrulaması kontrolü (isteğe bağlı)
             if (!useremail.EmailConfirmed)
             {
-                return Unauthorized("Email not confirmed.");
+                return Unauthorized("E-posta adresiniz henüz doğrulanmadı. Lütfen e-posta adresinizi doğrulayın.");
             }
 
             // Şifre doğrulama işlemi
-            var result = await _signInManager.PasswordSignInAsync(useremail.UserName, user.Password, false, false);
+            var result = await _signInManager.PasswordSignInAsync(useremail.UserName, user.Password, false, true); // LockoutOnFailure: true
             if (result.Succeeded)
             {
+                // Kilitleme sayacını sıfırla (başarılı giriş)
+                await _userManager.ResetAccessFailedCountAsync(useremail);
+
                 // JWT token oluşturma
                 var token = GenerateJwtToken(useremail);
 
@@ -69,8 +80,16 @@ namespace Namespace
                     token = token
                 });
             }
-
-            return Unauthorized("Invalid login attempt. Please check your credentials.");
+            else if (result.IsLockedOut)
+            {
+                return Unauthorized("Birden Fazla Hatalı Giriş Yaptınız. Hesabınız 15 dakika boyunca kilitlenecektir.");
+            }
+            else
+            {
+                // Başarısız giriş sayısını artır
+                await _userManager.AccessFailedAsync(useremail);
+                return Unauthorized("Hatalı şifre girdiniz. Lütfen tekrar deneyin.");
+            }
         }
 
         [HttpPost]
@@ -79,14 +98,14 @@ namespace Namespace
             // Kullanıcı e-posta ve şifre alanlarının boş olup olmadığını kontrol edin
             if (string.IsNullOrEmpty(user.Email) || string.IsNullOrEmpty(user.Password))
             {
-                return BadRequest("Email and password are required.");
+                return BadRequest("E-posta ve şifre alanları boş olamaz.");
             }
 
             // Kullanıcıyı e-posta adresine göre arayın
             var useremail = await _userManager.FindByEmailAsync(user.Email);
             if (useremail != null)
             {
-                return BadRequest("Email already exists.");
+                return BadRequest("Bu e-posta adresi zaten kullanılıyor.");
             }
 
             // Yeni kullanıcı oluşturma
@@ -95,7 +114,7 @@ namespace Namespace
             if (result.Succeeded)
             {
                 // Kullanıcı başarıyla kaydedildi
-                return Ok("User registered successfully.");
+                return Ok("Kullanıcı başarıyla kaydedildi.");
             }
 
             return BadRequest(result.Errors);
@@ -103,19 +122,19 @@ namespace Namespace
 
         private string GenerateJwtToken(IdentityUser user)
         {
-            // JWT Key'in null olup olmadığını kontrol edin
             var jwtKey = _configuration["Jwt:Key"];
-            if (string.IsNullOrEmpty(jwtKey))
+            if (string.IsNullOrEmpty(jwtKey) || jwtKey.Length < 32) // 32 karakter = 256 bit
             {
-                throw new InvalidOperationException("JWT Key configuration is missing.");
+                throw new InvalidOperationException("JWT Key configuration is missing or too short. The key must be at least 256 bits (32 characters).");
             }
 
             // Claim'ler oluşturuluyor
             var claims = new[]
             {
                 new Claim(JwtRegisteredClaimNames.Sub, user.Email),
-                new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
-                // Ek claim'ler ekleyebilirsiniz
+                new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()), // Benzersiz kimlik
+                new Claim(JwtRegisteredClaimNames.Iat, DateTime.UtcNow.ToString()), // Token oluşturulma zamanı
+                // Gerekirse diğer gerekli claim'ler
             };
 
             // Güvenlik anahtarı ve imza bilgileri
@@ -127,7 +146,7 @@ namespace Namespace
                 issuer: _configuration["Jwt:Issuer"],
                 audience: _configuration["Jwt:Audience"],
                 claims: claims,
-                expires: DateTime.Now.AddMinutes(30),
+                expires: DateTime.Now.AddMinutes(30), // Kısa süreli token
                 signingCredentials: creds);
 
             return new JwtSecurityTokenHandler().WriteToken(token);
